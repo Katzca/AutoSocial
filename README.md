@@ -56,10 +56,9 @@ local control plane.
 - npm
 - Playwright Chromium
 - FFmpeg and ffprobe in `PATH`
-- Optional: `yt-dlp.exe` in `autodownload/` for downloader features
+- Optional: `yt-dlp` (installed in `PATH` or placed in `autodownload/yt-dlp` / `autodownload/yt-dlp.exe`)
 
-Windows is the primary target for the bundled `yt-dlp.exe` workflow, but the
-dashboard and core Node services are ordinary Node.js.
+AutoSocial Studio is fully cross-platform and supports **macOS**, **Linux**, and **Windows**.
 
 ## Quick Start
 
@@ -71,9 +70,10 @@ npm run doctor
 
 Create your local environment file:
 
-```powershell
-Copy-Item .env.example .env
+```bash
+cp .env.example .env
 ```
+*(On Windows Command Prompt: `copy .env.example .env`)*
 
 Start the dashboard:
 

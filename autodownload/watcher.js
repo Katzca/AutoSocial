@@ -20,14 +20,13 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 
 // Load .env from project root
-require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
-
 const { config } = require("../src/config");
 const {
     getActiveAccount,
     getAccountQueueDirs,
     ensureAccountDirs,
 } = require("../src/account-manager");
+const { resolveYtDlpExecutable } = require("../src/yt-dlp-utils");
 
 const args = process.argv.slice(2);
 
@@ -46,7 +45,7 @@ const PLATFORMS = config.autoDownload.platforms;
 const ACCOUNT_ARG = getArg("account", process.env.ACCOUNT_ID || "");
 
 const BASE_DIR = __dirname;
-const YT_DLP = path.join(BASE_DIR, "yt-dlp.exe");
+const YT_DLP = resolveYtDlpExecutable(path.resolve(BASE_DIR, "..")).path;
 const DOWNLOADS = path.join(BASE_DIR, "downloads");
 const ARCHIVE = path.join(BASE_DIR, "archive.txt");
 
