@@ -11,6 +11,7 @@ const path = require("path");
 const { execFile } = require("child_process");
 const { config } = require("./config");
 const { enrichRecentSlideshowDownloads } = require("./tiktok-slideshow-downloader");
+const { resolveYtDlpExecutable } = require("./yt-dlp-utils");
 
 function nowIso() {
     return new Date().toISOString();
@@ -26,7 +27,7 @@ class ProfileDownloadController {
         this.logs = [];
 
         this.baseDir = path.resolve(config.projectRoot, "autodownload");
-        this.ytDlp = path.join(this.baseDir, "yt-dlp.exe");
+        this.ytDlp = resolveYtDlpExecutable().path;
         this.downloadsDir = path.join(this.baseDir, "profile_downloads");
 
         ensureDir(this.downloadsDir);

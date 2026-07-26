@@ -195,19 +195,21 @@ async function buildSetupHealth() {
     );
   }
 
-  const localYtDlp = path.join(config.projectRoot, "autodownload", "yt-dlp.exe");
-  const pathYtDlp = safeStat(localYtDlp)?.isFile() ? null : commandWorks("yt-dlp", ["--version"]);
+  const { resolveYtDlpExecutable } = require("./yt-dlp-utils");
+  const ytDlpRes = resolveYtDlpExecutable(config.projectRoot);
+  const pathYtDlp = ytDlpRes.isLocal && ytDlpRes.exists ? null : commandWorks("yt-dlp", ["--version"]);
+  const ytDlpOk = (ytDlpRes.isLocal && ytDlpRes.exists) || pathYtDlp?.ok;
   checks.push(
     makeCheck(
       "yt-dlp",
       "yt-dlp",
-      safeStat(localYtDlp)?.isFile() || pathYtDlp?.ok ? "ok" : "warn",
-      safeStat(localYtDlp)?.isFile()
-        ? localYtDlp
+      ytDlpOk ? "ok" : "warn",
+      ytDlpRes.isLocal && ytDlpRes.exists
+        ? ytDlpRes.path
         : pathYtDlp?.ok
           ? `PATH version ${pathYtDlp.output}`
           : "Optional downloader dependency is missing",
-      "Add autodownload/yt-dlp.exe if you want downloader features."
+      "Add autodownload/yt-dlp binary or install system yt-dlp for downloader features."
     )
   );
 

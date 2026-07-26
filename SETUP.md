@@ -29,22 +29,31 @@ npm run doctor
 `yt-dlp` is optional. If the doctor reports it as missing, only the downloader
 features are affected.
 
-## 2. Add yt-dlp for Downloader Features
+## 2. Add FFmpeg and yt-dlp for Downloader Features
 
-Download the latest Windows binary from the yt-dlp releases page and place it
-here:
+AutoSocial Studio runs cross-platform on **macOS**, **Linux**, and **Windows**.
 
-```text
-autodownload/yt-dlp.exe
-```
+- **macOS**:
+  ```bash
+  brew install ffmpeg yt-dlp
+  ```
+- **Linux (Ubuntu/Debian)**:
+  ```bash
+  sudo apt update && sudo apt install -y ffmpeg yt-dlp
+  ```
+- **Windows**:
+  Install FFmpeg and add it to `PATH`. Place the `yt-dlp.exe` binary in `autodownload/yt-dlp.exe` (or install via winget / PATH).
 
-You can skip this if you do not use auto-download or profile-download features.
+You can also place platform binaries directly into `autodownload/`:
+- Windows: `autodownload/yt-dlp.exe`
+- macOS / Linux: `autodownload/yt-dlp`
 
 ## 3. Create `.env`
 
-```powershell
-Copy-Item .env.example .env
+```bash
+cp .env.example .env
 ```
+*(On Windows Command Prompt: `copy .env.example .env`)*
 
 Important settings:
 

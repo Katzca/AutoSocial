@@ -91,9 +91,10 @@ function checkPlaywrightChromium() {
 }
 
 function checkYtDlp() {
-  const localExe = path.join(projectRoot, "autodownload", "yt-dlp.exe");
-  if (fs.existsSync(localExe)) {
-    addCheck("yt-dlp", "ok", localExe);
+  const { resolveYtDlpExecutable } = require("../src/yt-dlp-utils");
+  const res = resolveYtDlpExecutable(projectRoot);
+  if (res.isLocal && res.exists) {
+    addCheck("yt-dlp", "ok", res.path);
     return;
   }
 
@@ -103,7 +104,7 @@ function checkYtDlp() {
     pathTool.ok ? "ok" : "warn",
     pathTool.ok
       ? `PATH version ${pathTool.output}`
-      : "optional; add autodownload/yt-dlp.exe for downloader features"
+      : "optional; add autodownload/yt-dlp executable or install system yt-dlp"
   );
 }
 
