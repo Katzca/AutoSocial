@@ -1,22 +1,4 @@
-const API = {
-  async get(endpoint) {
-    const res = await fetch(endpoint);
-    if (!res.ok) throw new Error(`API Error: ${res.status}`);
-    return res.json();
-  },
-  async post(endpoint, body) {
-    const options = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    };
-    if (body !== undefined) {
-      options.body = JSON.stringify(body);
-    }
-    const res = await fetch(endpoint, options);
-    if (!res.ok) throw new Error(`API Error: ${res.status}`);
-    return res.json();
-  },
-};
+const API = createApiClient();
 
 function escapeHtml(value) {
   return String(value ?? "")
