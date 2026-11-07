@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { config } = require("./config");
-const { getNextQueuedItem, getCaptionPaths } = require("./youtube-queue");
+const { getNextQueuedItem, getSidecarPaths } = require("./youtube-queue");
 const { uploadVideo } = require("./youtube-uploader");
 const { ensureDirectories, fileExists, moveWithTimestamp } = require("./fs-utils");
 
@@ -25,13 +25,13 @@ async function moveFileSafely(sourcePath, targetDir, label) {
   }
 }
 
-async function postSingleVideo({ videoPath, caption, postedDir, failedDir, accountId }) {
+async function postSingleVideo({ videoPath, caption, scheduleAt, title, tags, category, coverPath, postedDir, failedDir, accountId }) {
   const posted = postedDir || config.youtubePostedDir;
   const failed = failedDir || config.youtubeFailedDir;
   await ensureDirectories([posted, failed]);
 
-  const result = await uploadVideo({ videoPath, caption, accountId });
-  const captionPaths = getCaptionPaths(videoPath);
+  const result = await uploadVideo({ videoPath, caption, scheduleAt, title, tags, category, coverPath, accountId });
+  const captionPaths = getSidecarPaths(videoPath);
 
   if (result.ok) {
     const movedVideo = await moveFileSafely(videoPath, posted, "posted video");

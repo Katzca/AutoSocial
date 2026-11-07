@@ -3,6 +3,7 @@ const fs = require("fs/promises");
 const { chromium } = require("playwright");
 const { config } = require("./config");
 const uiLabels = require("./platform-ui-labels");
+const { parseSchedule } = require("./schedule-sidecar");
 const {
   getActiveAccount,
   getPlatformProfileDir,
@@ -17,6 +18,7 @@ async function openPersistentContext(accountId) {
   await fs.mkdir(profileDir, { recursive: true });
   return chromium.launchPersistentContext(profileDir, {
     headless: config.headless,
+    channel: process.env.BROWSER_CHANNEL || undefined,
     viewport: { width: 1400, height: 1000 },
     locale: config.browserLocale,
     timezoneId: config.timezone,
@@ -176,9 +178,9 @@ async function setVideoFile(page, videoPath) {
   }
 }
 
-async function setTitleAndDescription(page, caption, fileNameStem) {
+async function setTitleAndDescription(page, caption, fileNameStem, title) {
   const effectiveCaption = caption && caption.trim() ? caption.trim() : "";
-  const baseTitle = effectiveCaption || fileNameStem;
+  const baseTitle = title || effectiveCaption || fileNameStem;
   const shortTitle = baseTitle.slice(0, 95);
   const descriptionText = effectiveCaption || config.defaultCaption || "";
 
@@ -318,10 +320,117 @@ async function clickNext(page) {
   }
 }
 
+async function dbgDump(page, name) {
+  if (!process.env.YOUTUBE_DEBUG) return;
+  const base = path.resolve(config.projectRoot, `debug-yt-${name}`);
+  await page.screenshot({ path: `${base}.png` }).catch(() => { });
+  const html = await page.locator("ytcp-uploads-dialog").first().evaluate((el) => el.outerHTML).catch(() => "");
+  await fs.writeFile(`${base}.html`, html).catch(() => { });
+}
+
+async function setYouTubeSchedule(page, when) {
+  const hhmm = `${String(when.hour).padStart(2, "0")}:${String(when.minute).padStart(2, "0")}`;
+  const dateText = `${when.day} ${uiLabels.YOUTUBE_SHORT_MONTHS_TR[when.month - 1]} ${when.year}`;
+
+  await page.locator("#second-container-expand-button").first().click({ timeout: 8000 });
+  await page.waitForTimeout(800);
+  await dbgDump(page, "sched-1-open");
+
+  await page.locator("#datepicker-trigger").first().click({ timeout: 5000 });
+  await page.waitForTimeout(600);
+  await dbgDump(page, "sched-2-date");
+  const dateInput = page.locator("ytcp-date-picker input").first();
+  await dateInput.fill(dateText, { timeout: 5000 });
+  await dateInput.press("Enter");
+  await page.waitForTimeout(600);
+
+  const timeInput = page.locator("#time-of-day-container input, #time-of-day-trigger input").first();
+  await timeInput.fill(hhmm, { timeout: 5000 });
+  await timeInput.press("Enter");
+  await page.waitForTimeout(600);
+  await dbgDump(page, "sched-3-set");
+
+  // Guard: do not publish if the date and time on screen differ from the request.
+  const shownDate = (await page.locator("#datepicker-trigger").first().innerText()).trim();
+  const shownTime = await timeInput.inputValue();
+  console.log(`YouTube schedule shown: ${shownDate} ${shownTime}`);
+  if (shownDate !== dateText || shownTime !== hhmm) {
+    throw new Error(`Schedule mismatch: wanted ${dateText} ${hhmm}, screen shows ${shownDate} ${shownTime}.`);
+  }
+}
+
+// Closing the browser before the upload finishes would cut the video off.
+async function waitForYouTubeUploadComplete(page) {
+  const deadline = Date.now() + 20 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const text = await page.locator("ytcp-uploads-dialog").first().innerText().catch(() => "");
+    if (!uiLabels.pattern("youtubeUploading").test(text)) return;
+    await page.waitForTimeout(2000);
+  }
+  throw new Error("YouTube upload did not finish in time.");
+}
+
+async function setYouTubeDetails(page, { tags, category, coverPath }) {
+  await page.locator("ytcp-button#toggle-button button, #toggle-button").first().click({ timeout: 8000 });
+  await page.waitForTimeout(1000);
+  await dbgDump(page, "details-1-open");
+
+  // Altered-content question: answer "No".
+  const noAltered = page.locator('tp-yt-paper-radio-button[name="VIDEO_HAS_ALTERED_CONTENT_NO"]').first();
+  const alteredClicked = await noAltered.click({ timeout: 4000 }).then(() => true).catch(() => false);
+  console.log(`YouTube altered-content No: ${alteredClicked}`);
+
+  if (tags) {
+    const tagInput = page.locator('#tags-container input, ytcp-free-text-chip-bar input, input[aria-label*="Etiket"], input[aria-label*="Tags"]').first();
+    await tagInput.click({ timeout: 5000 });
+    await tagInput.pressSequentially(`${tags},`, { delay: 5 });
+    await page.waitForTimeout(400);
+    const chips = await page.locator("ytcp-free-text-chip-bar ytcp-chip").allInnerTexts().catch(() => []);
+    console.log(`YouTube tags shown: ${chips.map((c) => c.trim()).join(" | ")}`);
+    const firstTag = tags.split(",")[0].trim();
+    if (!chips.some((c) => c.includes(firstTag))) throw new Error("YouTube tags were not added.");
+  }
+
+  if (category) {
+    await page.locator("ytcp-form-select#category ytcp-dropdown-trigger, #category ytcp-dropdown-trigger, ytcp-form-select#category").first().click({ timeout: 5000 });
+    await page.waitForTimeout(600);
+    await dbgDump(page, "details-2-category");
+    await page.locator("tp-yt-paper-item, ytcp-text-menu tp-yt-paper-item").filter({ hasText: new RegExp(`^\\s*${category}\\s*$`) }).first().click({ timeout: 5000 });
+    await page.waitForTimeout(500);
+    const shown = (await page.locator("ytcp-form-select#category, #category").first().innerText()).trim();
+    console.log(`YouTube category shown: ${shown.replace(/\s+/g, " ")}`);
+    if (!shown.includes(category)) throw new Error(`Category not set: wanted ${category}, screen shows ${shown}.`);
+  }
+
+  if (coverPath) {
+    await page.locator("ytcp-thumbnail-uploader input#file-loader").first().setInputFiles(coverPath, { timeout: 8000 });
+    await page.waitForTimeout(4000);
+    const editor = page.locator("ytcp-video-custom-still-editor").first();
+    await editor.scrollIntoViewIfNeeded().catch(() => { });
+    const errorTip = (await editor.locator("ytcp-form-error-tip").first().innerText().catch(() => "")).trim();
+    await dbgDump(page, "details-4-thumb");
+    console.log(`YouTube thumbnail set; error tip: "${errorTip}"`);
+    if (errorTip) throw new Error(`YouTube thumbnail rejected: ${errorTip}`);
+  }
+  await dbgDump(page, "details-3-set");
+}
+
+async function clickScheduleDone(page) {
+  const done = page.locator("ytcp-button#done-button button").first();
+  const label = (await done.innerText()).trim();
+  console.log(`YouTube done button: ${label}`);
+  if (!uiLabels.pattern("youtubeScheduleButton").test(label)) {
+    throw new Error(`Done button says "${label}", not Schedule; not clicking.`);
+  }
+  await done.click({ timeout: 8000 });
+}
+
 async function setVisibilityAndPublish(page) {
+  const vis = String(process.env.YOUTUBE_VISIBILITY || "public").toLowerCase();
+  const visKey = vis === "private" ? "youtubePrivate" : vis === "unlisted" ? "youtubeUnlisted" : "youtubePublic";
   const visibilityOptions = [
-    page.getByRole("radio", { name: uiLabels.pattern("youtubePublic") }),
-    page.locator('tp-yt-paper-radio-button').filter({ hasText: uiLabels.pattern("youtubePublic") }),
+    page.getByRole("radio", { name: uiLabels.pattern(visKey) }),
+    page.locator('tp-yt-paper-radio-button').filter({ hasText: uiLabels.pattern(visKey) }),
   ];
   for (const option of visibilityOptions) {
     const clicked = await clickFirstVisibleEnabledLocator(page, option);
@@ -404,26 +513,38 @@ async function closeLoginSession() {
   return { ok: true, alreadyClosed: false };
 }
 
-async function uploadVideo({ videoPath, caption, accountId }) {
+async function uploadVideo({ videoPath, caption, scheduleAt, title, tags, category, coverPath, accountId }) {
   const absoluteVideoPath = path.resolve(videoPath);
   const context = await openPersistentContext(accountId);
   const page = context.pages()[0] || (await context.newPage());
   let closeHoldMs = 0;
   try {
+    const when = scheduleAt ? parseSchedule(scheduleAt) : null;
     await gotoUploadPage(page);
     await setVideoFile(page, absoluteVideoPath);
     await page.waitForTimeout(Math.max(config.postDelayMs, 5000));
     await setTitleAndDescription(
       page,
       caption,
-      path.parse(absoluteVideoPath).name
+      path.parse(absoluteVideoPath).name,
+      title
     );
     await markNotMadeForKids(page);
     await setNotAgeRestricted(page);
+    await setYouTubeDetails(page, { tags, category, coverPath });
     await clickNext(page);
-    const published = await setVisibilityAndPublish(page);
-    if (!published) {
-      throw new Error("Could not find/click YouTube publish button.");
+    await waitForYouTubeUploadComplete(page);
+    if (when) {
+      await setYouTubeSchedule(page, when);
+      if (process.env.YOUTUBE_DRY_RUN) {
+        throw new Error("DRY RUN: stopped before Schedule.");
+      }
+      await clickScheduleDone(page);
+    } else {
+      const published = await setVisibilityAndPublish(page);
+      if (!published) {
+        throw new Error("Could not find/click YouTube publish button.");
+      }
     }
 
     const confirmation = await waitForPublishConfirmation(page);

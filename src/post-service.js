@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { config } = require("./config");
-const { getNextQueuedItem, getCaptionPaths } = require("./queue");
+const { getNextQueuedItem, getSidecarPaths } = require("./queue");
 const { uploadVideo } = require("./tiktok-uploader");
 const { ensureDirectories, fileExists, moveWithTimestamp } = require("./fs-utils");
 
@@ -25,13 +25,13 @@ async function moveFileSafely(sourcePath, targetDir, label) {
   }
 }
 
-async function postSingleVideo({ videoPath, caption, source, postedDir, failedDir, accountId }) {
+async function postSingleVideo({ videoPath, caption, scheduleAt, coverPath, source, postedDir, failedDir, accountId }) {
   const posted = postedDir || config.postedDir;
   const failed = failedDir || config.failedDir;
   await ensureDirectories([posted, failed]);
 
-  const result = await uploadVideo({ videoPath, caption, source, accountId });
-  const captionPaths = getCaptionPaths(videoPath);
+  const result = await uploadVideo({ videoPath, caption, scheduleAt, coverPath, source, accountId });
+  const captionPaths = getSidecarPaths(videoPath);
 
   if (result.ok) {
     const movedVideo = await moveFileSafely(videoPath, posted, "posted video");
