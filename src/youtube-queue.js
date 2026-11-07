@@ -1,6 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { config } = require("./config");
+const { planPaths, readPlan } = require("./schedule-sidecar");
 
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm", ".avi", ".mkv"]);
 
@@ -10,6 +11,11 @@ function getCaptionPaths(videoPath) {
     path.join(parsed.dir, `${parsed.name}.description`),
     path.join(parsed.dir, `${parsed.name}.txt`),
   ];
+}
+
+// Every file archived together with the video.
+function getSidecarPaths(videoPath) {
+  return [...getCaptionPaths(videoPath), ...planPaths(videoPath)];
 }
 
 async function readCaption(videoPath) {
@@ -58,6 +64,7 @@ async function getNextQueuedItem(queueDir) {
   return {
     videoPath,
     caption,
+    ...(await readPlan(videoPath)),
     captionPaths: getCaptionPaths(videoPath),
   };
 }
@@ -65,4 +72,5 @@ async function getNextQueuedItem(queueDir) {
 module.exports = {
   getNextQueuedItem,
   getCaptionPaths,
+  getSidecarPaths,
 };

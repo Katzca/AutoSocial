@@ -3,6 +3,7 @@ const fs = require("fs/promises");
 const { chromium } = require("playwright");
 const { config } = require("./config");
 const uiLabels = require("./platform-ui-labels");
+const { parseSchedule } = require("./schedule-sidecar");
 const {
   getActiveAccount,
   getPlatformProfileDir,
@@ -17,6 +18,7 @@ async function openPersistentContext(accountId) {
   await fs.mkdir(profileDir, { recursive: true });
   return chromium.launchPersistentContext(profileDir, {
     headless: config.headless,
+    channel: process.env.BROWSER_CHANNEL || undefined,
     viewport: { width: 1400, height: 1000 },
     locale: config.browserLocale,
     timezoneId: config.timezone,
@@ -712,18 +714,14 @@ async function clickFirstVisibleButton(page, nameRegex, timeout = 3000) {
 }
 
 async function dismissInterferingOverlays(page) {
-  await page
-    .getByRole("button", { name: uiLabels.pattern("tiktokCancel") })
-    .click({ timeout: 800 })
-    .catch(() => { });
+  // NOTE: never click a generic "Cancel" here: while uploading it cancels the upload.
+  await dismissTikTokOverlays(page);
 
   // TikTok Studio sometimes opens "content checks" and other hints dialogs
   // that block the publish button; dismiss/accept them before publishing.
   const overlayActions = [
-    uiLabels.pattern("tiktokEnable"),
     uiLabels.pattern("tiktokContinue"),
     uiLabels.pattern("tiktokLater"),
-    uiLabels.pattern("tiktokClose"),
   ];
 
   for (let pass = 0; pass < 3; pass += 1) {
@@ -1197,7 +1195,200 @@ async function startLoginSessionCli() {
   });
 }
 
-async function uploadVideo({ videoPath, caption, source, accountId }) {
+async function dismissTikTokOverlays(page) {
+  const clickBtn = async (re) =>
+    page.getByRole("button", { name: re }).first().click({ timeout: 300 }).then(() => true).catch(() => false);
+  // Accidental "cancel your upload?" prompt: answer No.
+  if (await page.getByText(/Sure you want to cancel your upload\?/).first().isVisible().catch(() => false)) {
+    await clickBtn(/^no$/i);
+  }
+  // Accidental "Discard this post?" prompt: keep the post.
+  const discardPrompt = page.getByText(/^Discard this post\?$/).first();
+  if (await discardPrompt.isVisible().catch(() => false)) {
+    await clickBtn(uiLabels.exactPattern("tiktokNotNow"));
+  }
+  // Privacy-preserving choice: decline optional cookies.
+  await clickBtn(uiLabels.exactPattern("tiktokDeclineCookies"));
+  // Auto content checks prompt: Cancel, scoped to that prompt only.
+  const heading = page.getByText(uiLabels.pattern("tiktokContentChecksHeading")).first();
+  if (await heading.isVisible().catch(() => false)) {
+    const box = page.locator(
+      `xpath=//*[${uiLabels.terms("tiktokContentChecksText").map((t) => `contains(text(),"${t}")`).join(" or ")}]/ancestor::div[.//button[${uiLabels.terms("tiktokDialogCancel").map((t) => `normalize-space()="${t}"`).join(" or ")}]][1]`
+    ).first();
+    await box.getByRole("button", { name: uiLabels.exactPattern("tiktokDialogCancel") }).first().click({ timeout: 800 }).catch(() => { });
+  }
+  await clickBtn(uiLabels.exactPattern("tiktokGotIt"));
+}
+
+async function waitForTikTokUploaded(page) {
+  const started = Date.now();
+  const deadline = started + 20 * 60 * 1000;
+  let seenUploading = false;
+  for (let i = 0; Date.now() < deadline; i += 1) {
+    await dismissTikTokOverlays(page);
+    const text = await page.locator("body").innerText().catch(() => "");
+    const uploading = /\d{1,3}(\.\d+)?\s?%/.test(text) || /\d+(\.\d+)?\s?[MG]B\s?\/\s?\d+(\.\d+)?\s?[MG]B/i.test(text);
+    const cancelVisible = await page.getByRole("button", { name: /^cancel$/i }).first().isVisible().catch(() => false);
+    if (uploading || cancelVisible) seenUploading = true;
+    // The form can render before the upload card: do not return before the card was seen.
+    const settled = seenUploading || Date.now() - started > 20000;
+    if (settled && uiLabels.pattern("tiktokWhenToPost").test(text) && !uploading && !cancelVisible) return;
+    await page.waitForTimeout(1500);
+  }
+  throw new Error("TikTok upload did not finish in time.");
+}
+
+async function setTikTokVisibility(page) {
+  const vis = String(process.env.TIKTOK_VISIBILITY || "").toLowerCase();
+  if (!vis || vis === "public" || vis === "everyone") return;
+  const label = vis === "private" || vis === "only me" ? /^only (me|you)$/i : vis === "friends" ? /^friends$/i : null;
+  if (!label) throw new Error(`Unknown TIKTOK_VISIBILITY: ${vis}`);
+  await page.getByText(/^Everyone$/).first().click({ timeout: 5000 });
+  await page.waitForTimeout(600);
+  await page.getByText(label).first().click({ timeout: 5000 });
+  await page.waitForTimeout(600);
+  await dbgShot(page, "after-visibility");
+  // Guard: the selected value must really be the private one before publishing.
+  if (label.source.includes("only")) {
+    const ok = await page.getByText(/^only (me|you)$/i).first().isVisible().catch(() => false);
+    if (!ok) throw new Error("Visibility did not switch to Only you; not publishing.");
+  }
+}
+
+async function dumpTikTok(page, name) {
+  if (!process.env.TIKTOK_DEBUG) return;
+  const base = path.resolve(config.projectRoot, `debug-tt-${name}`);
+  await page.screenshot({ path: `${base}.png` }).catch(() => { });
+  const html = await page.locator("body").evaluate((el) => el.outerHTML).catch(() => "");
+  await require("fs/promises").writeFile(`${base}.html`, html).catch(() => { });
+}
+
+async function findInputByValue(page, re) {
+  const inputs = page.locator("input");
+  const n = await inputs.count();
+  for (let i = 0; i < n; i += 1) {
+    const value = await inputs.nth(i).inputValue().catch(() => "");
+    if (re.test(value)) return inputs.nth(i);
+  }
+  return null;
+}
+
+// The scrolling list ignores a plain click, so send the full event sequence.
+async function pressTimeItem(item) {
+  await item.evaluate((el) => {
+    el.scrollIntoView({ block: "center" });
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      const Ctor = type.startsWith("pointer") ? PointerEvent : MouseEvent;
+      el.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true, composed: true }));
+    }
+  });
+}
+
+async function setTikTokSchedule(page, when) {
+  const pad = (v) => String(v).padStart(2, "0");
+  const wantDate = `${when.year}-${pad(when.month)}-${pad(when.day)}`;
+  const wantTime = `${pad(when.hour)}:${pad(when.minute)}`;
+  if (when.minute % 5 !== 0) throw new Error("TikTok schedule minutes must be a multiple of 5.");
+
+  await page.locator('input[type="radio"][value="schedule"]').first().evaluate((el) => el.click());
+  await page.waitForTimeout(1500);
+  await dumpTikTok(page, "sched-1-radio");
+
+  const dateInput = await findInputByValue(page, /^\d{4}-\d{2}-\d{2}$/);
+  const timeInput = await findInputByValue(page, /^\d{2}:\d{2}$/);
+  if (!dateInput || !timeInput) throw new Error("TikTok schedule date/time inputs not found.");
+
+  await dateInput.click({ timeout: 5000 });
+  await page.waitForTimeout(800);
+  await dumpTikTok(page, "sched-2-date");
+  await goToTikTokMonth(page, when);
+  const dayCell = page.locator('.calendar-wrapper [class*="day"]:not([class*="disabled"])')
+    .filter({ hasText: new RegExp(`^${when.day}$`) }).first();
+  await dayCell.click({ timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await timeInput.click({ timeout: 5000 });
+  await page.waitForTimeout(1200);
+  await dumpTikTok(page, "sched-3-time");
+  await pressTimeItem(page.locator(".tiktok-timepicker-left").filter({ hasText: new RegExp(`^${pad(when.hour)}$`) }).first());
+  await page.waitForTimeout(800);
+  await pressTimeItem(page.locator(".tiktok-timepicker-right").filter({ hasText: new RegExp(`^${pad(when.minute)}$`) }).first());
+  await page.waitForTimeout(800);
+  // Close the time list so it does not cover other controls: click an empty area.
+  await page.mouse.click(700, 30);
+  await page.waitForTimeout(500);
+  await dumpTikTok(page, "sched-4-set");
+
+  // Guard: do not publish if the date and time on screen differ from the request.
+  const shownDate = await dateInput.inputValue();
+  const shownTime = await timeInput.inputValue();
+  console.log(`TikTok schedule shown: ${shownDate} ${shownTime}`);
+  if (shownDate !== wantDate || shownTime !== wantTime) {
+    throw new Error(`Schedule mismatch: wanted ${wantDate} ${wantTime}, screen shows ${shownDate} ${shownTime}.`);
+  }
+}
+
+// Uploads our own image through the "Edit cover" dialog.
+async function setTikTokCover(page, coverPath) {
+  await page.getByText(uiLabels.exactPattern("tiktokEditCover")).first().click({ timeout: 8000 });
+  await page.waitForTimeout(1500);
+  await dumpTikTok(page, "cover-1-open");
+  // This button opens a native file dialog: listen first so Playwright intercepts it.
+  const chooserPromise = page.waitForEvent("filechooser", { timeout: 8000 });
+  await page.getByText(uiLabels.exactPattern("tiktokUploadCover")).first().click({ timeout: 8000 });
+  const chooser = await chooserPromise;
+  await chooser.setFiles(coverPath);
+  await page.waitForTimeout(2500);
+  await dumpTikTok(page, "cover-3-file");
+  await page.getByRole("button", { name: uiLabels.exactPattern("tiktokCoverSave") }).last().click({ timeout: 8000 });
+  await page.waitForTimeout(2000);
+  await dumpTikTok(page, "cover-4-saved");
+  console.log("TikTok cover uploaded.");
+}
+
+async function goToTikTokMonth(page, when) {
+  const title = (await page.locator(".calendar-wrapper .month-title").first().innerText()).trim().toLowerCase();
+  const shownYear = Number((await page.locator(".calendar-wrapper .year-title").first().innerText()).trim());
+  const shownMonth = uiLabels.TIKTOK_MONTHS.findIndex((names) => names.includes(title)) + 1;
+  if (!shownMonth || !shownYear) throw new Error(`Unknown TikTok calendar header: ${title} ${shownYear}.`);
+  const steps = (when.year * 12 + when.month) - (shownYear * 12 + shownMonth);
+  if (steps < 0) throw new Error("TikTok calendar is past the requested month.");
+  const nextArrow = page.locator(".calendar-wrapper .month-header-wrapper .arrow").last();
+  for (let i = 0; i < steps; i += 1) {
+    await nextArrow.click({ timeout: 3000 });
+    await page.waitForTimeout(400);
+  }
+}
+
+function tikTokMainButton(page) {
+  return page.locator('[data-e2e="post_video_button"]').first();
+}
+
+// "Post" publishes immediately: only click when the main button is an enabled "Schedule".
+async function waitForTikTokScheduleButton(page) {
+  const button = tikTokMainButton(page);
+  for (let i = 0; i < 60; i += 1) {
+    const label = (await button.innerText().catch(() => "")).trim();
+    const disabled = await button.getAttribute("data-disabled").catch(() => "true");
+    if (uiLabels.exactPattern("tiktokScheduleButton").test(label) && disabled === "false") {
+      console.log(`TikTok main button ready: ${label}`);
+      return;
+    }
+    await page.waitForTimeout(1500);
+  }
+  throw new Error("TikTok main button never became an enabled Schedule button; not publishing.");
+}
+
+async function clickTikTokScheduleButton(page) {
+  await tikTokMainButton(page).click({ timeout: 8000 });
+}
+
+async function dbgShot(page, name) {
+  if (!process.env.TIKTOK_DEBUG) return;
+  await page.screenshot({ path: path.resolve(config.projectRoot, `debug-tt-${name}.png`), fullPage: true }).catch(() => { });
+}
+
+async function uploadVideo({ videoPath, caption, scheduleAt, coverPath, source, accountId }) {
   const absoluteVideoPath = path.resolve(videoPath);
   const context = await openPersistentContext(accountId);
   const page = context.pages()[0] || (await context.newPage());
@@ -1205,16 +1396,49 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
   let publishResponseTracker = null;
 
   try {
+    const when = scheduleAt ? parseSchedule(scheduleAt) : null;
     await gotoUploadPage(page);
+    await page.waitForTimeout(3000);
+    // Unsaved-draft banner from an earlier aborted run: discard it.
+    await page.getByRole("button", { name: uiLabels.exactPattern("tiktokDiscardDraft") }).first().click({ timeout: 2500 }).catch(() => { });
+    await page.getByRole("button", { name: uiLabels.exactPattern("tiktokDeclineCookies") }).first().click({ timeout: 2500 }).catch(() => { });
     await setVideoFile(page, absoluteVideoPath);
+    await dbgShot(page, "after-select");
+    await waitForTikTokUploaded(page);
+    await dismissTikTokOverlays(page);
     await waitForUploadReady(page);
+    await dbgShot(page, "after-ready");
     await setCaption(page, caption || config.defaultCaption);
+    if (caption) {
+      // Guard: do not publish an incomplete caption (the hashtag line can get dropped).
+      const typed = await page.locator('div[contenteditable="true"]').first().innerText().catch(() => "");
+      const norm = (t) => t.replace(/\s+/g, "");
+      console.log(`TikTok caption typed: ${typed.replace(/\s+/g, " ").slice(0, 200)}`);
+      if (norm(typed) !== norm(caption)) throw new Error("TikTok caption does not match the intended text.");
+    }
     await addDefaultSound(page, source).catch((error) => {
       console.log(`Sound step failed softly: ${error.message}`);
     });
     await disableShortContentCheck(page);
+    if (coverPath) {
+      await setTikTokCover(page, coverPath);
+    }
+    if (when) {
+      await setTikTokSchedule(page, when);
+      await waitForTikTokScheduleButton(page);
+    } else {
+      await setTikTokVisibility(page);
+    }
+    await dbgShot(page, "before-publish");
+    if (process.env.TIKTOK_DRY_RUN) {
+      throw new Error("DRY RUN: stopped before Publish.");
+    }
     publishResponseTracker = createPublishResponseTracker(page);
-    await clickPublish(page);
+    if (when) {
+      await clickTikTokScheduleButton(page);
+    } else {
+      await clickPublish(page);
+    }
     const confirmation = await waitForPublishConfirmation(page, publishResponseTracker);
     if (!confirmation.ok) {
       throw new Error(`Publish verification failed: ${confirmation.reason}`);

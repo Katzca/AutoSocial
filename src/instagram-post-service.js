@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { config } = require("./config");
-const { getNextQueuedItem, getCaptionPaths } = require("./instagram-queue");
+const { getNextQueuedItem, getSidecarPaths } = require("./instagram-queue");
 const { uploadVideo } = require("./instagram-uploader");
 const { ensureDirectories, fileExists, moveWithTimestamp } = require("./fs-utils");
 
@@ -25,13 +25,13 @@ async function moveFileSafely(sourcePath, targetDir, label) {
   }
 }
 
-async function postSingleVideo({ videoPath, caption, postedDir, failedDir, accountId }) {
+async function postSingleVideo({ videoPath, caption, coverPath, postedDir, failedDir, accountId }) {
   const posted = postedDir || config.instagramPostedDir;
   const failed = failedDir || config.instagramFailedDir;
   await ensureDirectories([posted, failed]);
 
-  const result = await uploadVideo({ videoPath, caption, accountId });
-  const captionPaths = getCaptionPaths(videoPath);
+  const result = await uploadVideo({ videoPath, caption, coverPath, accountId });
+  const captionPaths = getSidecarPaths(videoPath);
 
   if (result.ok) {
     const movedVideo = await moveFileSafely(videoPath, posted, "posted video");

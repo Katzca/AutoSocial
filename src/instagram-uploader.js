@@ -20,6 +20,7 @@ async function openPersistentContext(accountId) {
   await fs.mkdir(profileDir, { recursive: true });
   return chromium.launchPersistentContext(profileDir, {
     headless: config.headless,
+    channel: process.env.BROWSER_CHANNEL || undefined,
     viewport: { width: 1400, height: 1000 },
     userAgent: REALISTIC_USER_AGENT,
     locale: config.browserLocale,
@@ -144,6 +145,23 @@ async function ensureCreateFlowInput(page) {
   const input = page.locator('input[type="file"]').first();
   if ((await input.count()) > 0) return input;
 
+  // Sidebar "+" icon (label may only appear as a tooltip / svg aria-label).
+  const plusIcons = [
+    page.locator(uiLabels.terms("instagramCreateIcon").map((t) => `svg[aria-label="${t}"]`).join(", ")).first(),
+    page.locator('[aria-label="New post"], [aria-label="Create"]').first(),
+  ];
+  for (const icon of plusIcons) {
+    if (!(await icon.click({ timeout: 3000 }).then(() => true).catch(() => false))) continue;
+    console.log("Instagram sidebar create icon clicked.");
+    await page.waitForTimeout(1200);
+    const postItem = page.getByText(uiLabels.exactPattern("instagramPostMenuItem")).first();
+    if (await postItem.click({ timeout: 3000 }).then(() => true).catch(() => false)) {
+      console.log("Instagram Post menu item clicked.");
+      await page.waitForTimeout(1500);
+    }
+    if ((await input.count()) > 0) return input;
+  }
+
   const createPattern = uiLabels.pattern("create");
   const postFormatPattern = uiLabels.pattern("instagramPostFormat", "instagramReelFormat");
   const createEntryPoints = [
@@ -161,6 +179,13 @@ async function ensureCreateFlowInput(page) {
     console.log("Instagram create entry clicked.");
     await page.waitForTimeout(1200);
     if ((await input.count()) > 0) return input;
+    // Create opens a small menu (Post / Live video / Ad): pick "Post".
+    const postItem = page.getByText(uiLabels.exactPattern("instagramPostMenuItem")).first();
+    if (await postItem.click({ timeout: 3000 }).then(() => true).catch(() => false)) {
+      console.log("Instagram Post menu item clicked.");
+      await page.waitForTimeout(1500);
+      if ((await input.count()) > 0) return input;
+    }
   }
 
   // Some flows open a chooser first (post/reel/story).
@@ -238,7 +263,62 @@ async function setVideoFile(page, videoPath) {
   await input.setInputFiles(videoPath);
 }
 
-async function clickNextButtons(page) {
+async function dismissPopups(page) {
+  const notNow = page.getByRole("button", { name: uiLabels.exactPattern("instagramNotNow") });
+  for (let i = 0; i < 3; i += 1) {
+    const clicked = await notNow.first().click({ timeout: 2500 }).then(() => true).catch(() => false);
+    if (!clicked) break;
+    await page.waitForTimeout(800);
+  }
+}
+
+async function ensureOriginalCrop(page) {
+  // "Video posts are now shared as reels" info dialog.
+  await page.getByRole("button", { name: uiLabels.exactPattern("instagramOk") }).first().click({ timeout: 4000 }).catch(() => { });
+  await page.waitForTimeout(800);
+  await dbgShot(page, "crop-0");
+  const cropBtn = page.locator([...uiLabels.terms("instagramCropIcon").map((t) => `svg[aria-label="${t}"]`), '[aria-label="Select crop"]'].join(", ")).first();
+  if (!(await cropBtn.click({ timeout: 5000 }).then(() => true).catch(() => false))) {
+    console.log("Instagram crop button not found.");
+    return;
+  }
+  await page.waitForTimeout(800);
+  await dbgShot(page, "crop-1");
+  const original = page.getByText(uiLabels.exactPattern("instagramCropOriginal")).first();
+  if (await original.click({ timeout: 4000 }).then(() => true).catch(() => false)) {
+    console.log("Instagram crop set to Original.");
+  }
+  await page.waitForTimeout(800);
+  await dbgShot(page, "crop-2");
+}
+
+async function dbgShot(page, name) {
+  if (!process.env.INSTAGRAM_DEBUG) return;
+  await page.screenshot({ path: path.resolve(config.projectRoot, `debug-ig-${name}.png`) }).catch(() => { });
+}
+
+async function dumpIg(page, name) {
+  if (!process.env.INSTAGRAM_DEBUG) return;
+  const base = path.resolve(config.projectRoot, `debug-ig-${name}`);
+  await page.screenshot({ path: `${base}.png` }).catch(() => { });
+  const html = await page.locator('[role="dialog"]').last().evaluate((el) => el.outerHTML).catch(() => "");
+  await fs.writeFile(`${base}.html`, html).catch(() => { });
+}
+
+// Uploads our own image as the cover on the reel edit step.
+async function setInstagramCover(page, coverPath) {
+  await dumpIg(page, "cover-1-edit");
+  const trigger = page.getByText(uiLabels.exactPattern("instagramCoverFromComputer")).first();
+  const chooserPromise = page.waitForEvent("filechooser", { timeout: 8000 });
+  await trigger.click({ timeout: 8000 });
+  const chooser = await chooserPromise;
+  await chooser.setFiles(coverPath);
+  await page.waitForTimeout(2500);
+  await dumpIg(page, "cover-2-set");
+  console.log("Instagram cover uploaded.");
+}
+
+async function clickNextButtons(page, onEditStep) {
   const nextSelectors = [
     page.getByRole("button", { name: uiLabels.pattern("next") }),
     page.locator("button").filter({ hasText: uiLabels.pattern("next") }),
@@ -251,6 +331,8 @@ async function clickNextButtons(page) {
       if (didClick) {
         clicked = true;
         await page.waitForTimeout(1200);
+        await dbgShot(page, `after-next-${pass + 1}`);
+        if (pass === 0 && onEditStep) await onEditStep();
         break;
       }
     }
@@ -299,7 +381,7 @@ async function clickShare(page) {
 
 async function waitForPostConfirmation(page, startedUrl) {
   // Wait up to 60 * 1500ms = 90 seconds for upload processing
-  for (let i = 0; i < 60; i += 1) {
+  for (let i = 0; i < 200; i += 1) {
     const text = await page.locator("body").innerText().catch(() => "");
     if (uiLabels.pattern("posted").test(text)) {
       return { ok: true };
@@ -317,18 +399,42 @@ async function waitForPostConfirmation(page, startedUrl) {
   return { ok: false, reason: "No reliable Instagram post confirmation within timeout." };
 }
 
-async function uploadVideo({ videoPath, caption, accountId }) {
+async function uploadVideo({ videoPath, caption, coverPath, accountId }) {
   const absoluteVideoPath = path.resolve(videoPath);
   const context = await openPersistentContext(accountId);
   const page = context.pages()[0] || (await context.newPage());
   let closeHoldMs = 0;
 
   try {
+    // Instagram has no web scheduling: stop instead of publishing a scheduled video now.
+    const parsedVideo = path.parse(absoluteVideoPath);
+    const scheduleFile = path.join(parsedVideo.dir, `${parsedVideo.name}.schedule`);
+    if (await fs.access(scheduleFile).then(() => true).catch(() => false)) {
+      throw new Error("Instagram cannot schedule from the web; remove the .schedule file to publish now.");
+    }
     await gotoUploadPage(page);
+    await dismissPopups(page);
     await setVideoFile(page, absoluteVideoPath);
     await page.waitForTimeout(Math.max(config.postDelayMs, 5000));
-    await clickNextButtons(page);
+    await dbgShot(page, "after-upload");
+    await ensureOriginalCrop(page);
+    await clickNextButtons(page, coverPath ? () => setInstagramCover(page, coverPath) : null);
     await setCaption(page, caption || config.defaultCaption);
+    await dbgShot(page, "after-caption");
+    // Guard: never publish a non-9:16 preview (square crop bug seen before).
+    const vbox = await page.locator('[role="dialog"] video').first().boundingBox().catch(() => null);
+    if (!vbox || vbox.height <= 0) {
+      throw new Error("Could not measure the preview video; not publishing.");
+    }
+    const ratio = vbox.width / vbox.height;
+    console.log(`Instagram preview ratio: ${ratio.toFixed(3)}`);
+    if (ratio < 0.5 || ratio > 0.62) {
+      throw new Error(`Preview is not 9:16 (ratio ${ratio.toFixed(2)}); not publishing.`);
+    }
+    await dbgShot(page, "before-share");
+    if (process.env.INSTAGRAM_DRY_RUN) {
+      throw new Error("DRY RUN: stopped before Share.");
+    }
 
     const startedUrl = page.url();
     const shared = await clickShare(page);
