@@ -173,6 +173,7 @@ async function getPlatformProfileDir(platform, accountId) {
 async function hasSavedPlatformSession(platform, accountId) {
   const profileDir = await getPlatformProfileDir(platform, accountId);
   const cookieCandidates = [
+    path.resolve(profileDir, "Default", "Network", "Cookies"),
     path.resolve(profileDir, "Default", "Cookies"),
     path.resolve(profileDir, "Cookies"),
     path.resolve(profileDir, "Network", "Cookies"),
